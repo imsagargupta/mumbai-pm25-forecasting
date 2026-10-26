@@ -1,0 +1,251 @@
+import json
+import joblib
+import numpy as np
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+st.set_page_config(
+    page_title="Mumbai PM2.5 Forecast",
+    page_icon="🌫️",
+    layout="wide"
+)
+
+st.title("Mumbai PM2.5 Forecasting Dashboard")
+st.caption("Hourly air pollution analysis and machine learning estimates")
+
+# Load project files
+@st.cache_data
+def load_data():
+    data = pd.read_csv(
+        "mumbai_pm25_hourly.csv",
+        parse_dates=["period_start"]
+    )
+    stations = pd.read_csv("stations.csv")
+
+    data["mean"] = pd.to_numeric(data["mean"], errors="coerce")
+    data = data.dropna(
+        subset=["station_id", "period_start", "mean"]
+    )
+    data = data[data["mean"] >= 0]
+    data = data.sort_values(["station_id", "period_start"])
+    data = data.drop_duplicates(
+        ["station_id", "period_start"],
+        keep="last"
+    )
+    return data, stations
+
+
+@st.cache_resource
+def load_model():
+    with open("model_config.json", "r") as f:
+        config = json.load(f)
+    model = joblib.load("pm25_model.joblib")
+    return model, config
+
+
+try:
+    data, stations = load_data()
+    model, config = load_model()
+except Exception as e:
+    st.error(f"Could not load project files: {e}")
+    st.stop()
+
+station_names = (
+    stations.drop_duplicates("station_id")
+    .set_index("station_id")["station_name"]
+    .to_dict()
+)
+
+station_ids = sorted(data["station_id"].unique())
+
+selected_station = st.sidebar.selectbox(
+    "Choose monitoring station",
+    station_ids,
+    format_func=lambda x: f"{x} — {station_names.get(x, x)}"
+)
+
+station_data = (
+    data[data["station_id"] == selected_station]
+    .sort_values("period_start")
+    .copy()
+)
+
+if station_data.empty:
+    st.warning("No data available for this station.")
+    st.stop()
+
+latest = station_data.iloc[-1]
+
+# Summary cards
+c1, c2, c3 = st.columns(3)
+c1.metric("Latest observed PM2.5", f"{latest['mean']:.1f} µg/m³")
+c2.metric("Station average", f"{station_data['mean'].mean():.1f} µg/m³")
+c3.metric("Total observations", f"{len(station_data):,}")
+
+st.info(
+    f"Latest observation: {latest['period_start']}. "
+    "The dataset ends in September 2025; this is not a live air-quality feed."
+)
+
+# Historical chart
+st.subheader("Historical PM2.5 readings")
+
+min_date = station_data["period_start"].min().date()
+max_date = station_data["period_start"].max().date()
+
+date_range = st.sidebar.date_input(
+    "Choose chart date range",
+    value=(max(min_date, max_date - pd.Timedelta(days=30)), max_date),
+    min_value=min_date,
+    max_value=max_date
+)
+
+if not isinstance(date_range, (tuple, list)) or len(date_range) != 2:
+    st.warning("Please select both a start and an end date.")
+    st.stop()
+
+start_date, end_date = date_range
+
+if start_date > end_date:
+    st.error("Start date must be before end date.")
+    st.stop()
+
+chart_df = station_data[
+    (station_data["period_start"].dt.date >= start_date)
+    & (station_data["period_start"].dt.date <= end_date)
+].set_index("period_start")
+
+st.line_chart(chart_df["mean"], y_label="PM2.5 (µg/m³)")
+
+# One-hour forecast
+st.subheader("Next-hour PM2.5 estimate")
+
+station_lookup = station_data.set_index("period_start")["mean"]
+last_time = station_data["period_start"].max()
+next_time = last_time + pd.Timedelta(hours=1)
+
+def get_exact_lag(hours):
+    target_time = next_time - pd.Timedelta(hours=hours)
+    return station_lookup.get(target_time, np.nan)
+
+lags = {
+    1: get_exact_lag(1),
+    2: get_exact_lag(2),
+    3: get_exact_lag(3),
+    24: get_exact_lag(24)
+}
+
+station_to_code = {
+    str(k): int(v)
+    for k, v in config["station_to_code"].items()
+}
+
+station_code = station_to_code.get(str(selected_station))
+
+if station_code is None:
+    st.warning("This station is not present in the saved model configuration.")
+elif pd.isna(lags[1]):
+    st.warning(
+        "No observation exists exactly one hour before the forecast time. "
+        "A forecast cannot be produced reliably."
+    )
+else:
+    features = pd.DataFrame([{
+        "station_code": station_code,
+        "lag_1": lags[1],
+        "lag_2": lags[2],
+        "lag_3": lags[3],
+        "lag_24": lags[24],
+        "hour": next_time.hour,
+        "day_of_week": next_time.dayofweek,
+        "month": next_time.month
+    }], columns=config["feature_columns"])
+
+    prediction = max(0, float(model.predict(features)[0]))
+
+    st.metric(
+        f"Estimated PM2.5 at {next_time}",
+        f"{prediction:.1f} µg/m³"
+    )
+    st.caption(
+        "Historical model estimate for the hour after the latest observation, "
+        "not a forecast for the current date."
+    )
+
+# Historical test evaluation
+st.subheader("Model performance")
+
+cutoff = pd.Timestamp(config["training_cutoff"])
+
+test_data = data[data["period_start"] >= cutoff].copy()
+groups = {
+    sid: group.set_index("period_start")["mean"]
+    for sid, group in test_data.groupby("station_id")
+}
+
+rows = []
+
+for row in test_data.itertuples(index=False):
+    timestamp = row.period_start
+    series = groups[row.station_id]
+
+    lag_values = {
+        h: series.get(timestamp - pd.Timedelta(hours=h), np.nan)
+        for h in [1, 2, 3, 24]
+    }
+
+    if pd.isna(lag_values[1]):
+        continue
+
+    code = station_to_code.get(str(row.station_id))
+    if code is None:
+        continue
+
+    rows.append({
+        "actual": row.mean,
+        "station_code": code,
+        "lag_1": lag_values[1],
+        "lag_2": lag_values[2],
+        "lag_3": lag_values[3],
+        "lag_24": lag_values[24],
+        "hour": timestamp.hour,
+        "day_of_week": timestamp.dayofweek,
+        "month": timestamp.month
+    })
+
+if rows:
+    evaluation = pd.DataFrame(rows)
+    X_eval = evaluation[config["feature_columns"]]
+    actual = evaluation["actual"].to_numpy()
+    predicted = model.predict(X_eval)
+
+    mae = mean_absolute_error(actual, predicted)
+    rmse = np.sqrt(mean_squared_error(actual, predicted))
+    r2 = r2_score(actual, predicted)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("MAE", f"{mae:.2f} µg/m³")
+    c2.metric("RMSE", f"{rmse:.2f} µg/m³")
+    c3.metric("R²", f"{r2:.3f}")
+
+    baseline_mae = mean_absolute_error(
+        actual, evaluation["lag_1"].to_numpy()
+    )
+    st.write(f"Previous-hour baseline MAE: {baseline_mae:.2f} µg/m³")
+else:
+    st.warning("Not enough consecutive test observations to calculate metrics.")
+
+# Station details
+st.subheader("Monitoring station details")
+details = stations[
+    stations["station_id"].astype(str) == str(selected_station)
+]
+st.dataframe(details, use_container_width=True)
+
+st.caption(
+    "Source: CPCB observations via the India Air Quality Database. "
+    "Predictions are estimates and are not official CPCB forecasts."
+)
