@@ -69,6 +69,39 @@ def fetch_recent_pm25():
 st.title("Mumbai PM2.5 Forecasting Dashboard")
 st.caption("Hourly air pollution analysis and machine learning estimates")
 
+# Latest available readings from the API
+st.subheader("Latest available Mumbai PM2.5 data")
+
+live_df, live_error = fetch_recent_pm25()
+
+if live_error:
+    st.warning(live_error)
+else:
+    latest_time = live_df["period_start"].max()
+    latest_rows = live_df[live_df["period_start"] == latest_time]
+    latest_city_mean = latest_rows["mean"].mean()
+
+    st.metric(
+        "Latest available PM2.5 average across reporting stations",
+        f"{latest_city_mean:.1f} µg/m³"
+    )
+    st.caption(
+        f"Latest source timestamp: {latest_time} (India Standard Time). "
+        "This is the newest timestamp returned by the API, not necessarily a live reading."
+    )
+
+    st.dataframe(
+        latest_rows[["station_id", "period_start", "mean"]]
+        .rename(columns={
+            "station_id": "Station ID",
+            "period_start": "Observation time",
+            "mean": "PM2.5 (µg/m³)"
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+
 # Load project files
 @st.cache_data
 def load_data():
