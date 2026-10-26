@@ -91,14 +91,21 @@ st.info(
 )
 
 # Historical chart
+
+# Historical chart
 st.subheader("Historical PM2.5 readings")
 
 min_date = station_data["period_start"].min().date()
 max_date = station_data["period_start"].max().date()
 
+default_start = max(
+    min_date,
+    max_date - pd.Timedelta(days=30)
+)
+
 date_range = st.sidebar.date_input(
     "Choose chart date range",
-    value=(max(min_date, max_date - pd.Timedelta(days=30)), max_date),
+    value=(default_start, max_date),
     min_value=min_date,
     max_value=max_date
 )
@@ -116,9 +123,38 @@ if start_date > end_date:
 chart_df = station_data[
     (station_data["period_start"].dt.date >= start_date)
     & (station_data["period_start"].dt.date <= end_date)
-].set_index("period_start")
+].copy()
 
-st.line_chart(chart_df["mean"], y_label="PM2.5 (µg/m³)")
+if chart_df.empty:
+    st.warning("No observations are available for this date range.")
+else:
+    # Keep missing hours as gaps rather than connecting across them.
+    chart_df = chart_df.set_index("period_start").sort_index()
+    hourly_values = chart_df["mean"].resample("h").mean()
+
+    st.caption(
+        f"{chart_df['mean'].count():,} observations in the selected period. "
+        "Blank gaps indicate hours without recorded readings."
+    )
+
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    ax.plot(
+        hourly_values.index,
+        hourly_values.values,
+        marker=".",
+        markersize=4,
+        linewidth=1
+    )
+    ax.set_title("Hourly PM2.5 concentration")
+    ax.set_xlabel("Date and time")
+    ax.set_ylabel("PM2.5 (µg/m³)")
+    ax.grid(True, alpha=0.3)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    st.pyplot(fig)
+    plt.close(fig)
+
 
 # One-hour forecast
 st.subheader("Next-hour PM2.5 estimate")
