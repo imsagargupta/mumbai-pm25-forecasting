@@ -155,6 +155,25 @@ else:
     st.pyplot(fig)
     plt.close(fig)
 
+# Daily average trend
+st.subheader("Daily average PM2.5")
+
+daily_df = (
+    chart_df["mean"]
+    .resample("D")
+    .mean()
+    .dropna()
+)
+
+if daily_df.empty:
+    st.info("There are no daily averages for this date range.")
+else:
+    st.line_chart(
+        daily_df,
+        x_label="Date",
+        y_label="Average PM2.5 (µg/m³)"
+    )
+
 
 # One-hour forecast
 st.subheader("Next-hour PM2.5 estimate")
