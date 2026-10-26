@@ -1,3 +1,5 @@
+import requests
+from datetime import datetime, timedelta
 import json
 import joblib
 import numpy as np
@@ -12,6 +14,57 @@ st.set_page_config(
     page_icon="🌫️",
     layout="wide"
 )
+
+
+@st.cache_data(ttl=900)
+def fetch_recent_pm25():
+    api_key = st.secrets.get("AQI_API_KEY", "")
+
+    if not api_key:
+        return None, "AQI_API_KEY is missing from Streamlit Secrets."
+
+    url = "https://airquality.xkdr.org/v1/measurements"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    params = {
+        "city": "Mumbai",
+        "parameter": "PM2.5",
+        "agg": "hourly",
+        "format": "csv"
+    }
+
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=30
+        )
+        response.raise_for_status()
+
+        from io import StringIO
+        live_df = pd.read_csv(StringIO(response.text))
+
+        if live_df.empty:
+            return None, "The API returned no recent PM2.5 readings."
+
+        live_df["period_start"] = pd.to_datetime(
+            live_df["period_start"], errors="coerce"
+        )
+        live_df["mean"] = pd.to_numeric(
+            live_df["mean"], errors="coerce"
+        )
+        live_df = live_df.dropna(
+            subset=["period_start", "mean"]
+        ).sort_values("period_start")
+
+        if live_df.empty:
+            return None, "No valid readings were returned."
+
+        return live_df, None
+
+    except Exception as exc:
+        return None, f"Could not retrieve recent readings: {exc}"
 
 st.title("Mumbai PM2.5 Forecasting Dashboard")
 st.caption("Hourly air pollution analysis and machine learning estimates")
