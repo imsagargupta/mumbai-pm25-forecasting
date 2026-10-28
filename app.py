@@ -30,9 +30,7 @@ def fetch_recent_pm25():
         "city": "Mumbai",
         "parameter": "PM2.5",
         "agg": "hourly",
-        "format": "csv",
-        "start": "2025-08-31",
-        "end": "2025-09-01"
+        "format": "csv"
     }
 
     try:
